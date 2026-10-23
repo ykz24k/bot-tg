@@ -1,55 +1,64 @@
 /**
  * ============================================================================
- * 🚀 USERBOT EXTRACTOR ENTERPRISE ULTIMATE PRO (V7.3 SMART EMOJI FIX) 🚀
+ * 🚀 USERBOT EXTRACTOR ENTERPRISE ULTIMATE PRO (V7.5 MEGA EXTENDED) 🚀
  * ============================================================================
- * - Scraping universal y multicanal en tiempo real.
- * - Captura absoluta de TODAS las respuestas (Live + Declined + Risk Bin).
- * - Algoritmo de Luhn para validación matemática de tarjetas bancarias.
- * - Memoria contextual de 3 niveles para extraer la CC de 16 dígitos enteros.
- * - Sanitizador inteligente de emojis: Reemplaza checks engañosos en declines.
- * - Persistencia de caché en disco y cola de mensajes anti-FloodWait.
+ * @file index.js
+ * @description Userbot avanzado y corporativo para Telegram. Diseñado para 
+ *              monitoreo multicanal masivo, extracción de tarjetas de crédito 
+ *              con validación algorítmica de Luhn, reconstrucción contextual de 
+ *              memoria de 3 niveles, sanitización inteligente de emojis falsos 
+ *              y persistencia de datos en disco mediante StringSession.
  * ============================================================================
  */
 
+// ============================================================================
+// SECCIÓN 0: IMPORTACIÓN DE MÓDULOS DEL SISTEMA Y LIBRERÍAS EXTERNAS
+// ============================================================================
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { TelegramClient } = require("telegram");
-const { StoreSession } = require("telegram/sessions");
+const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
 const { EditedMessage } = require("telegram/events/EditedMessage");
-const input = require("input");
 
 // ============================================================================
-// 1. CONFIGURACIÓN INICIAL Y VARIABLES DE ENTORNO
+// SECCIÓN 1: CONFIGURACIÓN INICIAL Y EXTRACCIÓN DE VARIABLES DE ENTORNO
 // ============================================================================
 const apiId = parseInt(process.env.API_ID, 10);
 const apiHash = process.env.API_HASH;
 const forwardTarget = process.env.FORWARD_TO || "me";
 
+// Validación estricta de credenciales críticas al inicio del proceso
 if (!apiId || !apiHash) {
-    console.error("[FATAL] ❌ Las variables API_ID y API_HASH son obligatorias en el archivo .env");
+    console.error("[FATAL ERROR] ❌ Las variables API_ID y API_HASH son obligatorias en el archivo .env o en Render.");
     process.exit(1);
 }
 
+// Función auxiliar para parsear listas de grupos separados por comas
 const parseEnvArray = (envVar) => (envVar || "").split(",").map(id => id.trim()).filter(Boolean);
 const targetGroups = parseEnvArray(process.env.TARGET_GROUPS);
 
+// Configuración de tiempos de vida para cachés y límites de envío
 const CACHE_TTL_MS = 1000 * 60 * 60 * (parseInt(process.env.CACHE_TTL_HOURS, 10) || 6);
 const MSG_CACHE_TTL_MS = 1000 * 60 * (parseInt(process.env.MSG_CACHE_MINUTES, 10) || 60);
 const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY_MS, 10) || 1200;
 
-const storeSession = new StoreSession("session_userbot");
+// Inicialización de la sesión basada en StringSession (para despliegues en la nube sin consola interactiva)
+const stringSession = new StringSession(process.env.SESSION_STRING || "");
 
 // ============================================================================
-// 2. EXPRESIONES REGULARES Y ESTRUCTURAS DE DATOS EN MEMORIA
+// SECCIÓN 2: DEFINICIÓN DE EXPRESIONES REGULARES Y ESTRUCTURAS EN MEMORIA RAM
 // ============================================================================
+// Regex altamente optimizada para capturar tarjetas de 15 o 16 dígitos con separadores variables
 const CC_REGEX = /\b(\d{15,16})[^\w\d]*(\d{2})[^\w\d]*(\d{2,4})[^\w\d]*(\d{3,4})\b/g;
 
+// Instanciación de estructuras Map para almacenamiento rápido en RAM
 const sentCardsCache = new Map();
 const messageCache = new Map();
 const groupNameCache = new Map();
 
+// Objeto global de estadísticas de rendimiento del bot
 const stats = {
     startTime: Date.now(),
     processedMessages: 0,
@@ -59,10 +68,11 @@ const stats = {
     errorsEncountered: 0
 };
 
+// Ruta física para guardar el archivo de respaldo de tarjetas procesadas
 const CACHE_FILE_PATH = path.join(__dirname, "sent_cards_cache.json");
 
 // ============================================================================
-// 3. COLA DE MENSAJES ANTI-FLOODWAIT (RATE-LIMITING)
+// SECCIÓN 3: CLASE GESTORA DE COLA DE MENSAJES (RATE LIMITING / ANTI-FLOOD)
 // ============================================================================
 class TelegramMessageQueue {
     constructor(client) {
@@ -71,6 +81,11 @@ class TelegramMessageQueue {
         this.isProcessing = false;
     }
 
+    /**
+     * Añade un mensaje a la cola de envío para proteger la cuenta contra FloodWaits.
+     * @param {string|number} target 
+     * @param {Object} messagePayload 
+     */
     async enqueue(target, messagePayload) {
         this.queue.push({ target, messagePayload });
         this.processQueue();
@@ -86,14 +101,16 @@ class TelegramMessageQueue {
                 await this.client.sendMessage(item.target, item.messagePayload);
             } catch (err) {
                 stats.errorsEncountered++;
-                console.error(`[!] Error al entregar mensaje en cola: ${err.message}`);
+                console.error(`[!] Error crítico al entregar mensaje en cola: ${err.message}`);
                 
+                // Manejo automático de restricciones temporales de Telegram
                 if (err.message.includes("FLOOD_WAIT")) {
                     const waitSeconds = parseInt(err.message.replace(/[^0-9]/g, ""), 10) || 15;
-                    console.warn(`[⚠️] Alerta FloodWait detectada. Pausando envío durante ${waitSeconds} segundos...`);
+                    console.warn(`[⚠️ ALERTA] FloodWait detectado en la API. Pausando transmisiones por ${waitSeconds} segundos...`);
                     await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
                 }
             }
+            // Retardo calculado entre mensajes sucesivos
             await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
         }
 
@@ -104,7 +121,7 @@ class TelegramMessageQueue {
 let messageQueueInstance = null;
 
 // ============================================================================
-// 4. PERSISTENCIA EN DISCO Y MANTENIMIENTO DE CACHÉ
+// SECCIÓN 4: MÓDULO DE PERSISTENCIA Y MANTENIMIENTO AUTOMÁTICO DE CACHÉ
 // ============================================================================
 function loadDiskCache() {
     try {
@@ -120,10 +137,10 @@ function loadDiskCache() {
                     restoredCount++;
                 }
             }
-            console.log(`[💾] Caché restaurada desde disco: ${restoredCount} registros activos cargados.`);
+            console.log(`[💾 PERSISTENCIA] Caché restaurada con éxito: ${restoredCount} registros activos cargados en RAM.`);
         }
     } catch (error) {
-        console.error(`[!] Error al cargar caché de disco: ${error.message}`);
+        console.error(`[!] Error al recuperar la caché desde el disco local: ${error.message}`);
     }
 }
 
@@ -135,7 +152,7 @@ function saveDiskCache() {
         }
         fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(cacheObject, null, 2), "utf-8");
     } catch (error) {
-        console.error(`[!] Error al guardar caché en disco: ${error.message}`);
+        console.error(`[!] Error al persistir la caché en el disco local: ${error.message}`);
     }
 }
 
@@ -164,9 +181,14 @@ function performCacheMaintenance() {
 }
 
 // ============================================================================
-// 5. VALIDACIONES Y CORRECCIÓN INTELIGENTE DE EMOJIS
+// SECCIÓN 5: VALIDACIONES MATEMÁTICAS (ALGORITMO DE LUHN) Y SANITIZACIÓN
 // ============================================================================
 
+/**
+ * Valida la estructura matemática de un número de tarjeta mediante el Algoritmo de Luhn.
+ * @param {string} cardNumber 
+ * @returns {boolean}
+ */
 function isValidLuhn(cardNumber) {
     let sum = 0;
     let shouldDouble = false;
@@ -181,6 +203,11 @@ function isValidLuhn(cardNumber) {
     return (sum % 10) === 0;
 }
 
+/**
+ * Extrae, formatea y valida un conjunto de tarjetas de un bloque de texto arbitrario.
+ * @param {string} text 
+ * @returns {string[]}
+ */
 function extractAndCleanCCs(text) {
     if (!text) return [];
     const matches = [];
@@ -195,6 +222,7 @@ function extractAndCleanCCs(text) {
 
         const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
 
+        // Validar rango de mes y comprobar algoritmo de Luhn
         if (month >= 1 && month <= 12) {
             if (isValidLuhn(ccNumber)) {
                 matches.push(`${ccNumber}|${match[2]}|${year}|${cvv}`);
@@ -204,6 +232,11 @@ function extractAndCleanCCs(text) {
     return [...new Set(matches)];
 }
 
+/**
+ * Remueve líneas de metadatos de usuario o referencias de canales para una visualización limpia.
+ * @param {string} text 
+ * @returns {string}
+ */
 function cleanUserData(text) {
     if (!text) return "";
     return text.split('\n').filter(line => {
@@ -220,9 +253,10 @@ function cleanUserData(text) {
 }
 
 /**
- * 🧠 CORRECCIÓN INTELIGENTE DE EMOJIS:
- * Si el bot original pone checks verdes (✅) en estados declinados, de fraude o errores,
- * este método los reemplaza por una cruz roja (❌) o advertencia (⚠️) para evitar confusiones.
+ * Sanitizador inteligente de emojis falsos o engañosos provistos por bots externos.
+ * @param {string} text 
+ * @param {boolean} isLive 
+ * @returns {string}
  */
 function sanitizeBotEmojis(text, isLive) {
     if (!text) return "";
@@ -230,10 +264,8 @@ function sanitizeBotEmojis(text, isLive) {
 
     return lines.map(line => {
         const lower = line.toLowerCase();
-
-        // Si es una respuesta declinada/muerta/fraude, limpiar los checks engañosos del bot
         if (!isLive) {
-            // Reemplazar checks verdes falsos por cruces rojas o neutrales
+            // Si no es un resultado exitoso, reemplazamos checks verdes por cruces rojas
             if (lower.includes("status:") || lower.includes("cc:") || lower.includes("elapsed:") || lower.includes("gate:")) {
                 line = line.replace(/✅/g, "❌");
             }
@@ -242,6 +274,9 @@ function sanitizeBotEmojis(text, isLive) {
     }).join('\n');
 }
 
+/**
+ * Recupera de forma segura el título del chat o grupo de procedencia.
+ */
 async function fetchGroupName(client, message, chatIdStr) {
     if (groupNameCache.has(chatIdStr)) return groupNameCache.get(chatIdStr);
     try {
@@ -265,19 +300,16 @@ function getUptimeString() {
 function printBanner() {
     console.clear();
     console.log("=================================================================");
-    console.log(" 🚀 USERBOT EXTRACTOR ENTERPRISE ULTIMATE PRO (V7.3 SMART) 🚀 ");
+    console.log(" 🚀 USERBOT EXTRACTOR ENTERPRISE ULTIMATE PRO (V7.5 MEGA) 🚀 ");
     console.log("=================================================================");
     console.log(`🎯 FILTRADO DE GRUPOS: ${targetGroups.length > 0 && !targetGroups.includes("*") ? targetGroups.length + " grupos específicos" : "TODOS LOS GRUPOS (*)"}`);
     console.log(`➡️ DESTINO DE REENVÍO: ${forwardTarget}`);
-    console.log(`⏳ TTL DE CACHÉ EN DISCO: ${process.env.CACHE_TTL_HOURS || 6} Horas`);
-    console.log(`⚡ DELAY DE COLA DE MENSAJES: ${RATE_LIMIT_DELAY} ms`);
     console.log("=================================================================\n");
 }
 
 // ============================================================================
-// 6. LÓGICA PRINCIPAL DE PROCESAMIENTO EN TIEMPO REAL
+// SECCIÓN 6: NÚCLEO DE PROCESAMIENTO DE MENSAJES EN TIEMPO REAL
 // ============================================================================
-
 async function processMessage(client, message, isEdit) {
     if (!message || !message.chatId || !message.text) return;
     
@@ -286,23 +318,28 @@ async function processMessage(client, message, isEdit) {
     const text = message.text;
     const lowerText = text.toLowerCase();
 
+    // Mantenimiento preventivo aleatorio de cachés
     if (Math.random() < 0.05) performCacheMaintenance();
 
+    // Comprobación de lista blanca o comodín de grupos
     if (targetGroups.length > 0 && !targetGroups.includes(chatIdStr) && !targetGroups.includes("*")) {
         return;
     }
 
-    // Comandos de control remoto
+    // -------------------------------------------------------------------------
+    // SUBSICIÓN DE COMANDOS ADMINISTRATIVOS REMOTOS
+    // -------------------------------------------------------------------------
     if (message.out && text.startsWith("/")) {
         const args = text.split(" ");
         const command = args[0].toLowerCase();
 
+        // 1. Comando /extraer <límite>
         if (command === "/extraer") {
             const limit = parseInt(args[1], 10) || 50;
             const groupTitle = await fetchGroupName(client, message, chatIdStr);
 
             await messageQueueInstance.enqueue(forwardTarget, {
-                message: `⏳ **[Scraping Histórico Iniciado]**\nAnalizando los últimos **${limit}** mensajes en **${groupTitle}**...`
+                message: `⏳ **[Scraping Histórico en Curso]**\nAnalizando los últimos **${limit}** mensajes en **${groupTitle}**...`
             });
 
             try {
@@ -331,43 +368,46 @@ async function processMessage(client, message, isEdit) {
                     stats.totalCCsExtracted += uniqueCCs.length;
                 } else {
                     await messageQueueInstance.enqueue(forwardTarget, {
-                        message: `⚠️ No se hallaron tarjetas nuevas o válidas en los últimos **${limit}** mensajes de **${groupTitle}**.`
+                        message: `⚠️ No se detectaron tarjetas válidas o nuevas en los últimos **${limit}** mensajes de **${groupTitle}**.`
                     });
                 }
             } catch (err) {
-                console.error(`[!] Error ejecutando /extraer: ${err.message}`);
+                console.error(`[!] Error al ejecutar comando /extraer: ${err.message}`);
             }
             return;
         }
 
+        // 2. Comando /stats (Panel de telemetría)
         if (command === "/stats") {
-            const statsMessage = 
-`📊 **[PANEL DE ESTADÍSTICAS USERBOT V7.3]**
+            const telemetryMessage = 
+`📊 **[PANEL DE ESTADÍSTICAS CORPORATIVO V7.5]**
 
-⏱️ **Tiempo Activo:** \`${getUptimeString()}\`
-📩 **Mensajes Escaneados:** \`${stats.processedMessages}\`
+⏱️ **Tiempo en Línea:** \`${getUptimeString()}\`
+📩 **Mensajes Analizados:** \`${stats.processedMessages}\`
 🎯 **Responses de Bots:** \`${stats.botResponsesCaptured}\`
 🕷️ **Scrapes Puros:** \`${stats.rawScrapesCaptured}\`
-💳 **Total CCs Extraídas:** \`${stats.totalCCsExtracted}\`
-💾 **Caché Activa (RAM):** \`${sentCardsCache.size}\`
-💬 **Mensajes en Historial:** \`${messageCache.size}\`
+💳 **Total CCs Procesadas:** \`${stats.totalCCsExtracted}\`
+💾 **Caché RAM Activa:** \`${sentCardsCache.size}\`
+💬 **Historial en Memoria:** \`${messageCache.size}\`
 ❌ **Errores de Red:** \`${stats.errorsEncountered}\``;
 
-            await messageQueueInstance.enqueue(forwardTarget, { message: statsMessage });
+            await messageQueueInstance.enqueue(forwardTarget, { message: telemetryMessage });
             return;
         }
 
+        // 3. Comando /limpiar (Reseteo de memorias locales)
         if (command === "/limpiar") {
             sentCardsCache.clear();
             messageCache.clear();
             saveDiskCache();
             await messageQueueInstance.enqueue(forwardTarget, {
-                message: `🧹 **[Mantenimiento Exitoso]** Las memorias RAM y de disco han sido reseteadas.`
+                message: `🧹 **[Mantenimiento Completado]** Las memorias RAM y de disco han sido vaciadas con éxito.`
             });
             return;
         }
     }
 
+    // Almacenamiento dinámico en memoria RAM para referencias cruzadas (Reply/Contexto)
     if (message.id) {
         messageCache.set(`${chatIdStr}_${message.id}`, {
             text: text,
@@ -375,11 +415,14 @@ async function processMessage(client, message, isEdit) {
         });
     }
 
+    // Filtrar estados temporales intermedios
     if (lowerText.trim() === "processing cc" || (lowerText.includes("processing cc") && !lowerText.includes("status:"))) {
         return;
     }
 
-    // Detección de respuesta de bot de checking
+    // -------------------------------------------------------------------------
+    // ANÁLISIS ESTRUCTURAL DE RESPUESTAS DE BOTS DE CHECKING
+    // -------------------------------------------------------------------------
     const isBotResponse = lowerText.includes("status:") || 
                           lowerText.includes("gate:") || 
                           lowerText.includes("elapsed:") || 
@@ -394,7 +437,7 @@ async function processMessage(client, message, isEdit) {
 
     let foundCCs = extractAndCleanCCs(text);
 
-    // Memoria contextual para recuperar la CC entera de 16 dígitos
+    // 🧠 RECONSTRUCCIÓN CON MEMORIA CONTEXTUAL PROFUNDA
     if (isBotResponse && (message.replyToMsgId || message.replyTo)) {
         const replyId = message.replyToMsgId || (message.replyTo && message.replyTo.replyToMsgId);
         if (replyId) {
@@ -417,12 +460,11 @@ async function processMessage(client, message, isEdit) {
     const groupTitle = await fetchGroupName(client, message, chatIdStr);
 
     // -------------------------------------------------------------------------
-    // CASO 1: PROCESAMIENTO DE RESPUESTAS DE BOT (TODAS: LIVE Y DECLINED)
+    // RAMIFICACIÓN 1: CAPTURA Y TRATAMIENTO DE RESPUESTAS DE BOTS
     // -------------------------------------------------------------------------
     if (isBotResponse) {
         const alertIcon = isEdit ? "🔄" : "🎯";
 
-        // 🧠 CLasificación rigurosa para saber si el estado es realmente Live/Aceptable o Declined/Fraude
         const explicitDeclines = [
             "declined", "call_issuer", "card_should_be_returned", "account_not_found", 
             "suspected_fraud", "invalid", "dead", "incorrect_cvc", "do_not_honor", 
@@ -431,7 +473,6 @@ async function processMessage(client, message, isEdit) {
 
         const isActualDecline = explicitDeclines.some(dec => lowerText.includes(dec));
         
-        // Es Live si no es decline explícito y contiene indicios positivos o Risk Bin
         const isLive = !isActualDecline && (
             lowerText.includes("approved") || 
             lowerText.includes("charged") || 
@@ -442,10 +483,7 @@ async function processMessage(client, message, isEdit) {
             lowerText.includes("success")
         );
 
-        // 🧹 Sanitizamos la respuesta original limpiando los emojis falsos si está caída
         const cleanResponse = cleanUserData(sanitizeBotEmojis(text, isLive));
-
-        // Asignamos el ticket visual correcto según la realidad, no según los emojis del bot
         const statusHeader = isLive ? "🟢 [LIVE / SUCCESS RESPONSE]" : "🔴 [DECLINED / DEAD RESPONSE]";
 
         let finalMessage = `${alertIcon} **${statusHeader}**\n🏷️ **Grupo:** *${groupTitle}*\n\n`;
@@ -470,7 +508,7 @@ async function processMessage(client, message, isEdit) {
         console.log(`[${new Date().toLocaleTimeString()}] ✅ BOT RESPONSE | Estado: ${isLive ? 'LIVE / RISK BIN' : 'DECLINED/FRAUD'} | Grupo: ${groupTitle}`);
     } 
     // -------------------------------------------------------------------------
-    // CASO 2: SCRAPING PURO DE TARJETAS SUELTAS EN CHATS
+    // RAMIFICACIÓN 2: SCRAPING PURO DE TARJETAS SUELTAS EN CHATS
     // -------------------------------------------------------------------------
     else {
         const newValidCCs = foundCCs.filter(cc => !sentCardsCache.has(cc));
@@ -492,14 +530,13 @@ async function processMessage(client, message, isEdit) {
 }
 
 // ============================================================================
-// 7. INICIALIZACIÓN DE CLIENTE TELEGRAM Y GESTIÓN DE CICLO DE VIDA
+// SECCIÓN 7: INICIALIZACIÓN Y ARRANQUE DEL CLIENTE DE TELEGRAM (STRINGSESSION)
 // ============================================================================
-
 (async () => {
     printBanner();
     loadDiskCache();
 
-    const client = new TelegramClient(storeSession, apiId, apiHash, {
+    const client = new TelegramClient(stringSession, apiId, apiHash, {
         connectionRetries: 30,
         useWSS: true,
         requestRetries: 5,
@@ -509,36 +546,34 @@ async function processMessage(client, message, isEdit) {
     messageQueueInstance = new TelegramMessageQueue(client);
 
     try {
-        await client.start({
-            phoneNumber: async () => await input.text("📱 Ingresa tu número de teléfono (+XX...): "),
-            password: async () => await input.text("🔒 Contraseña 2FA (Presiona Enter si no tienes): "),
-            phoneCode: async () => await input.text("✉️ Código de verificación recibido en Telegram: "),
-            onError: (err) => console.error("❌ Error crítico en autenticación:", err.message),
-        });
+        // Conexión autónoma mediante StringSession (Ideal para Render / Background Workers)
+        await client.connect();
+        console.log("✅ Sesión establecida de manera autónoma mediante StringSession.");
+        console.log("📡 Monitoreando flujos de datos en tiempo real...\n");
 
-        console.log("✅ Sesión iniciada y conectada correctamente a los servidores de Telegram.");
-        console.log("📡 Escuchando canales, chats y grupos en tiempo real...\n");
-
+        // Registro de eventos para mensajes nuevos
         client.addEventHandler(async (event) => {
             await processMessage(client, event.message, false);
         }, new NewMessage({}));
 
+        // Registro de eventos para mensajes editados (actualizaciones de estado de bots)
         client.addEventHandler(async (event) => {
             await processMessage(client, event.message, true);
         }, new EditedMessage({}));
 
     } catch (error) {
-        console.error(`[FATAL] Error general en el cliente de Telegram: ${error.message}`);
+        console.error(`[FATAL ERROR] Error general en el ciclo de vida del cliente Telegram: ${error.message}`);
         process.exit(1);
     }
 
+    // Manejadores globales para prevenir cierres inesperados del proceso de Node.js
     process.on("uncaughtException", (err) => {
         stats.errorsEncountered++;
-        console.error(`[FATAL EXCEPTION] Excepción no controlada: ${err.message}`);
+        console.error(`[FATAL EXCEPTION] Excepción no controlada detectada: ${err.message}`);
     });
 
     process.on("unhandledRejection", (reason) => {
         stats.errorsEncountered++;
-        console.error(`[FATAL REJECTION] Promesa rechazada no manejada: ${reason}`);
+        console.error(`[FATAL REJECTION] Promesa rechazada sin manejo catch: ${reason}`);
     });
 })();
